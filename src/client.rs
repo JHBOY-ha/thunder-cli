@@ -28,6 +28,9 @@ const API_PREFIX: &str = "/webman/3rdparty/pan-xunlei-com/index.cgi";
 /// discriminator, not the space value.
 const SPACE: &str = "";
 const TASK_TYPE: &str = "user#download";
+/// Task type for cloud offline download: the 迅雷 servers fetch the resource
+/// into the account's cloud drive (bypasses the local P2P data plane).
+const CLOUD_TASK_TYPE: &str = "user#download-url";
 
 /// A resource (file) inside a resolved magnet/torrent/URL.
 #[derive(Debug, Clone)]
@@ -69,6 +72,42 @@ impl Task {
             .strip_prefix("PHASE_TYPE_")
             .unwrap_or(&self.phase)
     }
+}
+
+/// A cloud offline-download task (resource stored into the cloud drive).
+#[derive(Debug, Clone)]
+pub struct CloudTask {
+    pub id: String,
+    pub name: String,
+    /// 0-100.
+    pub progress: i64,
+    pub phase: String,
+    /// The cloud file/folder id produced by the task (empty until known).
+    pub file_id: String,
+    pub message: String,
+}
+
+impl CloudTask {
+    pub fn phase_label(&self) -> &str {
+        self.phase
+            .strip_prefix("PHASE_TYPE_")
+            .unwrap_or(&self.phase)
+    }
+    pub fn is_complete(&self) -> bool {
+        self.phase == "PHASE_TYPE_COMPLETE"
+    }
+    pub fn is_error(&self) -> bool {
+        self.phase == "PHASE_TYPE_ERROR"
+    }
+}
+
+/// A file entry in the cloud drive.
+#[derive(Debug, Clone)]
+pub struct CloudFile {
+    pub id: String,
+    pub name: String,
+    pub size: i64,
+    pub is_dir: bool,
 }
 
 pub struct ThunderClient {
@@ -361,6 +400,140 @@ impl ThunderClient {
         Ok(id)
     }
 
+    /// Create a cloud offline-download task: the 迅雷 servers fetch `url`
+    /// into the account's cloud drive. POST drive/v1/task with
+    /// type=user#download-url. Returns the created task id.
+    ///
+    /// This bypasses the local P2P/CDN data plane entirely — useful when the
+    /// host can't reach the download nodes (containers, restricted networks).
+    pub fn cloud_add(&self, url: &str, name: Option<&str>) -> Result<String> {
+        let body = json!({
+            "type": CLOUD_TASK_TYPE,
+            "name": name.unwrap_or(""),
+            "file_size": "0",
+            "space": SPACE,
+            "params": { "url": url },
+        });
+        let v = self.request("POST", "drive/v1/task", Some(&body))?;
+        let id = v
+            .get("task")
+            .and_then(|t| t.get("id"))
+            .and_then(|x| x.as_str())
+            .unwrap_or_default()
+            .to_string();
+        Ok(id)
+    }
+
+    /// List cloud offline-download tasks (type=user#download-url).
+    pub fn cloud_tasks(&self, limit: u32) -> Result<Vec<CloudTask>> {
+        let path = format!(
+            "drive/v1/tasks?space={}&type={}&limit={}",
+            urlencoding::encode(SPACE),
+            urlencoding::encode(CLOUD_TASK_TYPE),
+            limit
+        );
+        let v = self.request("GET", &path, None)?;
+        let tasks = v
+            .get("tasks")
+            .and_then(|x| x.as_array())
+            .cloned()
+            .unwrap_or_default();
+        Ok(tasks.iter().map(json_to_cloud_task).collect())
+    }
+
+    /// Fetch a single cloud task by id (to poll its phase / resulting file_id).
+    pub fn cloud_task(&self, id: &str) -> Result<Option<CloudTask>> {
+        // Reuse the list and filter, since a dedicated per-task route is
+        // unconfirmed; the cloud task list is small.
+        Ok(self.cloud_tasks(100)?.into_iter().find(|t| t.id == id))
+    }
+
+    /// List entries inside a cloud folder (parent_id empty = drive root).
+    /// GET drive/v1/files?parent_id=..&space=
+    pub fn cloud_files(&self, parent_id: &str, limit: u32) -> Result<Vec<CloudFile>> {
+        let path = format!(
+            "drive/v1/files?space={}&parent_id={}&limit={}",
+            urlencoding::encode(SPACE),
+            urlencoding::encode(parent_id),
+            limit
+        );
+        let v = self.request("GET", &path, None)?;
+        let files = v
+            .get("files")
+            .and_then(|x| x.as_array())
+            .cloned()
+            .unwrap_or_default();
+        Ok(files.iter().map(json_to_cloud_file).collect())
+    }
+
+    /// Get the HTTPS direct-download link for a cloud file.
+    /// GET drive/v1/files/{id} → `web_content_link`.
+    pub fn cloud_file_link(&self, file_id: &str) -> Result<String> {
+        let path = format!("drive/v1/files/{}?space={}", file_id, urlencoding::encode(SPACE));
+        let v = self.request("GET", &path, None)?;
+        let link = v
+            .get("web_content_link")
+            .and_then(|x| x.as_str())
+            .unwrap_or_default()
+            .to_string();
+        if link.is_empty() {
+            return Err(anyhow!(
+                "no web_content_link for file {file_id} (not ready, or access restricted)"
+            ));
+        }
+        Ok(link)
+    }
+
+    /// Recursively collect all leaf files under a cloud folder (or the file
+    /// itself if `file_id` is a file). Returns (relative_path, CloudFile).
+    pub fn cloud_walk(&self, file_id: &str, name: &str) -> Result<Vec<(String, CloudFile)>> {
+        let mut out = Vec::new();
+        // Probe: list children; if empty and it's addressable as a file, treat
+        // as a single file.
+        let children = self.cloud_files(file_id, 200).unwrap_or_default();
+        if children.is_empty() {
+            out.push((name.to_string(), CloudFile {
+                id: file_id.to_string(),
+                name: name.to_string(),
+                size: 0,
+                is_dir: false,
+            }));
+            return Ok(out);
+        }
+        for c in children {
+            let rel = if name.is_empty() {
+                c.name.clone()
+            } else {
+                format!("{}/{}", name, c.name)
+            };
+            if c.is_dir {
+                out.extend(self.cloud_walk(&c.id, &rel)?);
+            } else {
+                out.push((rel, c));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Download a cloud file's bytes to a local path via its direct link.
+    /// Streams the HTTPS response straight to disk (pure HTTP, no P2P).
+    pub fn download_to(&self, file_id: &str, dest: &std::path::Path) -> Result<u64> {
+        let link = self.cloud_file_link(file_id)?;
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        let resp = self
+            .agent
+            .get(&link)
+            .call()
+            .with_context(|| format!("GET {link} failed"))?;
+        let mut reader = resp.into_reader();
+        let mut file = std::fs::File::create(dest)
+            .with_context(|| format!("create {}", dest.display()))?;
+        let n = std::io::copy(&mut reader, &mut file).context("stream download to disk")?;
+        Ok(n)
+    }
+
     /// List tasks. GET drive/v1/tasks?space=..&type=..&limit=..
     /// `only_active` narrows to pending+running via the `filters` param.
     pub fn list(&self, only_active: bool, limit: u32) -> Result<Vec<Task>> {
@@ -503,7 +676,27 @@ fn json_to_task(v: &Value) -> Task {
     }
 }
 
-/// Map known engine error strings to friendlier messages.
+fn json_to_cloud_task(v: &Value) -> CloudTask {
+    CloudTask {
+        id: v.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        name: v.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        progress: v.get("progress").and_then(as_i64).unwrap_or(0),
+        phase: v.get("phase").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        file_id: v.get("file_id").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        message: v.get("message").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+    }
+}
+
+fn json_to_cloud_file(v: &Value) -> CloudFile {
+    // Cloud files use kind "drive#folder" / "drive#file".
+    let kind = v.get("kind").and_then(|x| x.as_str()).unwrap_or("");
+    CloudFile {
+        id: v.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        name: v.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        size: v.get("size").and_then(as_i64).unwrap_or(0),
+        is_dir: kind.ends_with("folder"),
+    }
+}
 fn map_api_error(code: u16, body: &str) -> anyhow::Error {
     let hint = if body.contains("SPACE_FOLDER_NOT_EXIST") || body.contains("WRONG_SPACE_TO_GET_FILE") {
         "\n  hint: the download space/folder is invalid — is the engine logged in and running?"
