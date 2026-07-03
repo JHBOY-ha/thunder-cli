@@ -4,6 +4,14 @@ pub const SUPPORT_ARCH: &str = "armv8";
 #[cfg(target_arch = "x86_64")]
 pub const SUPPORT_ARCH: &str = "x86_64";
 
+/// Synology platform name — makes the engine believe it runs on a real
+/// Synology NAS (`isSynologyPlatform`), which it requires before accepting
+/// the download directory (otherwise `GetDownloadPaths !IsPathValid`).
+#[cfg(target_arch = "aarch64")]
+pub const SYNO_PLATFORM: &str = "rtd1296";
+#[cfg(target_arch = "x86_64")]
+pub const SYNO_PLATFORM: &str = "geminilake";
+
 /// Environment Variable
 pub const SYNO_AUTHENTICATE_PATH: &str = "/usr/syno/synoman/webman/modules/authenticate.cgi";
 pub const SYNO_INFO_PATH: &str = "/etc/synoinfo.conf";

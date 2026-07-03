@@ -3,8 +3,10 @@
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 pub mod asset;
+pub mod client;
 pub mod constant;
 mod daemon;
+mod dl;
 mod install;
 mod serve;
 pub mod util;
@@ -43,6 +45,8 @@ pub enum Commands {
     Log,
     /// Show the Http server daemon process
     PS,
+    /// Command-line download client (add/list/pause/rm tasks)
+    Dl(dl::DlConfig),
 }
 
 #[derive(Args, Clone)]
@@ -189,15 +193,17 @@ fn main() -> Result<()> {
             install::XunleiUninstall(install_config).run()?;
         }
         Commands::Run(server_config) => {
-            let install_config = InstallConfig::read_from_file()?;
+            #[allow(unused_mut)]
+            let mut install_config = InstallConfig::read_from_file()?;
             #[cfg(target_os = "linux")]
-            before_action(&install_config)?;
+            before_action(&mut install_config)?;
             serve::Serve::new(server_config, install_config).run()?;
         }
         Commands::Start(server_config) => {
-            let install_config = InstallConfig::read_from_file()?;
+            #[allow(unused_mut)]
+            let mut install_config = InstallConfig::read_from_file()?;
             #[cfg(target_os = "linux")]
-            before_action(&install_config)?;
+            before_action(&mut install_config)?;
             daemon::start()?;
             serve::Serve::new(server_config, install_config).run()?;
         }
@@ -210,30 +216,41 @@ fn main() -> Result<()> {
         Commands::Log => {
             daemon::log()?;
         }
+        Commands::Dl(dl_config) => {
+            dl::run(dl_config)?;
+        }
     }
     Ok(())
 }
 
 /// Running before the daemon starts, execute the following code
 #[cfg(target_os = "linux")]
-fn before_action(install_config: &InstallConfig) -> Result<()> {
+fn before_action(install_config: &mut InstallConfig) -> Result<()> {
     use nix::mount::MsFlags;
 
     let _ = nix::mount::umount(&install_config.mount_bind_download_path);
-    if nix::mount::mount(
+    let mounted = nix::mount::mount(
         Some(&install_config.download_path),
         &install_config.mount_bind_download_path,
         <Option<&'static [u8]>>::None,
         MsFlags::MS_BIND,
         <Option<&'static [u8]>>::None,
     )
-    .is_err()
-    {
-        anyhow::bail!(
-            "Mount {} to {} failed",
+    .is_ok();
+
+    if !mounted {
+        // No CAP_SYS_ADMIN (e.g. an unprivileged container / K8s pod): the
+        // kernel refuses bind mounts. Rather than fail to start, point the
+        // engine's download directory straight at the real download path so
+        // files still land in the configured location.
+        eprintln!(
+            "warning: bind mount {} -> {} failed (no mount permission?); \
+             using {} directly as the download directory",
             install_config.download_path.display(),
-            install_config.mount_bind_download_path.display()
+            install_config.mount_bind_download_path.display(),
+            install_config.download_path.display(),
         );
+        install_config.mount_bind_download_path = install_config.download_path.clone();
     }
     Ok(())
 }

@@ -1,15 +1,17 @@
+#[cfg(all(target_os = "linux", target_env = "musl"))]
 use anyhow::Result;
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", target_env = "musl"))]
 #[derive(rust_embed::RustEmbed)]
 #[folder = "src/libc/x86_64/"]
 struct Asset;
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", target_env = "musl"))]
 #[derive(rust_embed::RustEmbed)]
 #[folder = "src/libc/aarch64/"]
 struct Asset;
 
+#[cfg(all(target_os = "linux", target_env = "musl"))]
 pub(crate) fn ld_env(envs: &mut std::collections::HashMap<String, String>) -> Result<()> {
     use crate::{constant, util};
     use anyhow::Context;
@@ -95,6 +97,7 @@ pub(crate) fn ld_env(envs: &mut std::collections::HashMap<String, String>) -> Re
     Ok(())
 }
 
+#[cfg(all(target_os = "linux", target_env = "musl"))]
 fn is_musl() -> anyhow::Result<bool> {
     let output = std::process::Command::new("sh")
         .args(["-c", "ldd --version"])

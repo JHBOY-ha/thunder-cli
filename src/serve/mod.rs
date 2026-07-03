@@ -85,10 +85,18 @@ impl ConfigExt for (&ServeConfig, &InstallConfig) {
             String::from("DriveListen"),
             String::from(constant::SOCK_FILE),
         );
+        // Platform disguise: the engine only accepts the download directory
+        // when it believes it runs on a real Synology NAS.
+        envs.insert(String::from("PLATFORM"), String::from("群晖"));
+        envs.insert(
+            String::from("SYNOPLATFORM"),
+            String::from(constant::SYNO_PLATFORM),
+        );
         envs.insert(
             String::from("OS_VERSION"),
             format!(
-                "dsm {}.{}-{}",
+                "{} dsm {}.{}-{}",
+                constant::SYNO_PLATFORM,
                 constant::SYNOPKG_DSM_VERSION_MAJOR,
                 constant::SYNOPKG_DSM_VERSION_MINOR,
                 constant::SYNOPKG_DSM_VERSION_BUILD

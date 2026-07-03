@@ -8,21 +8,20 @@ use crate::{constant, InstallConfig, Running, ServeConfig};
 use anyhow::Context;
 use anyhow::Result;
 use axum::{
-    body::{Body, StreamBody},
+    body::Body,
     extract::State,
     http::{header, HeaderName, HeaderValue, StatusCode},
     response::{Html, IntoResponse, Redirect, Response},
     routing::{any, get, post},
     Form, Json, Router,
 };
-use axum_server::{tls_rustls::RustlsConfig, AddrIncomingConfig, Handle, HttpConfig};
+use axum_server::{tls_rustls::RustlsConfig, Handle};
 use serde::Deserialize;
 use std::{
     io::{BufRead, Read},
     process::Stdio,
     str::FromStr,
     sync::Arc,
-    time::Duration,
 };
 use tokio::io::BufReader;
 use tokio_util::io::ReaderStream;
@@ -80,19 +79,6 @@ impl FrontendServer {
             )
             .with_state(Arc::new((self.0.clone(), self.1.clone())));
 
-        // http server config
-        let http_config = HttpConfig::new()
-            .http1_title_case_headers(true)
-            .http1_preserve_header_case(true)
-            .http2_keep_alive_interval(Duration::from_secs(60))
-            .build();
-
-        // http server incoming config
-        let incoming_config = AddrIncomingConfig::new()
-            .tcp_sleep_on_accept_errors(true)
-            .tcp_keepalive(Some(Duration::from_secs(60)))
-            .build();
-
         // Signal the server to shutdown using Handle.
         let handle = Handle::new();
 
@@ -107,16 +93,12 @@ impl FrontendServer {
 
                 axum_server::bind_rustls(self.0.bind, tls_config)
                     .handle(handle)
-                    .addr_incoming_config(incoming_config)
-                    .http_config(http_config)
                     .serve(router.into_make_service())
                     .await
             }
             _ => {
                 axum_server::bind(self.0.bind)
                     .handle(handle)
-                    .addr_incoming_config(incoming_config)
-                    .http_config(http_config)
                     .serve(router.into_make_service())
                     .await
             }
@@ -279,7 +261,7 @@ async fn get_pan_thunder_com(
 
     Ok(builder
         .status(status_code)
-        .body(StreamBody::from(ReaderStream::new(cursor)))?
+        .body(Body::from_stream(ReaderStream::new(cursor)))?
         .into_response())
 }
 
@@ -294,9 +276,9 @@ fn extract_real_host(req: &RequestExt) -> &str {
 use axum::{http::Request, middleware::Next};
 
 /// Auth middleware
-pub(crate) async fn auth_middleware<B>(
-    request: Request<B>,
-    next: Next<B>,
+pub(crate) async fn auth_middleware(
+    request: Request<Body>,
+    next: Next,
 ) -> Result<Response, Redirect> {
     // If CHECK_AUTH is None, return true
     if let Some(None) = CHECK_AUTH.get() {

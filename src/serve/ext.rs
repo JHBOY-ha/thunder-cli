@@ -1,4 +1,4 @@
-use axum::body::Bytes;
+use axum::body::{Body, Bytes};
 use axum::response::{IntoResponse, Response};
 use axum::{
     async_trait,
@@ -17,20 +17,18 @@ pub struct RequestExt {
 }
 
 #[async_trait]
-impl<S, B> FromRequest<S, B> for RequestExt
+impl<S> FromRequest<S> for RequestExt
 where
-    Bytes: FromRequest<S, B>,
-    B: Send + 'static,
     S: Send + Sync,
 {
     type Rejection = Response;
 
-    async fn from_request(req: Request<B>, state: &S) -> Result<Self, Self::Rejection> {
+    async fn from_request(req: Request<Body>, state: &S) -> Result<Self, Self::Rejection> {
         let (parts, body) = req.into_parts();
 
         let body = if parts.headers.get(CONTENT_TYPE).is_some() {
             Some(
-                Bytes::from_request(Request::new(body), state)
+                Bytes::from_request(Request::from_parts(parts.clone(), body), state)
                     .await
                     .map_err(IntoResponse::into_response)?,
             )
