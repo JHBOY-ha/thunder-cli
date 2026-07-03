@@ -85,9 +85,15 @@ impl ConfigExt for (&ServeConfig, &InstallConfig) {
             String::from("DriveListen"),
             String::from(constant::SOCK_FILE),
         );
-        // Platform disguise: the engine only accepts the download directory
-        // when it believes it runs on a real Synology NAS.
-        envs.insert(String::from("PLATFORM"), String::from("群晖"));
+        // Platform identity. The engine (>= 3.23.x) runs its own platform
+        // detection and panics on an unusable value:
+        //   * "linux"     -> panic "linux not suport nasid" (initNasId)
+        //   * "群晖"/"synology" inside a container -> the engine sees it is
+        //     running in Docker and panics "synology not suport docker".
+        // "docker" is a first-class platform the engine supports directly
+        // (it grants qrcode/plugin privileges without the Synology disguise),
+        // and it is what this build runs under, so report that.
+        envs.insert(String::from("PLATFORM"), String::from("docker"));
         envs.insert(
             String::from("SYNOPLATFORM"),
             String::from(constant::SYNO_PLATFORM),

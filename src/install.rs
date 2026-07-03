@@ -120,11 +120,17 @@ impl Running for XunleiInstall {
             .chars()
             .take(7)
             .collect::<String>();
+        // The engine (>= 3.23.x) validates the platform via `platform_name`
+        // and `synobios`; without them it panics with "platform not support".
+        // `unique` alone (which sufficed for older builds) is not enough.
+        let synoinfo = format!(
+            "platform_name=\"{plat}\"\nsynobios=\"{plat}\"\nunique=\"synology_{id}_720+\"\n",
+            plat = constant::SYNO_PLATFORM,
+            id = hex_string,
+        );
         util::write_file(
             &synoinfo_path,
-            std::borrow::Cow::Borrowed(
-                format!("unique=\"synology_{}_720+\"", hex_string).as_bytes(),
-            ),
+            std::borrow::Cow::Borrowed(synoinfo.as_bytes()),
             0o644,
         )?;
 

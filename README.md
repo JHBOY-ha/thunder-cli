@@ -157,6 +157,16 @@ thunder dl pull <任务ID或文件ID> -o ./downloads
  - musl运行库的操作系统，若已存在glibc运行库，那么会优先兼容选择使用操作系统运行库环境（避免对系统其他软件依赖冲突，可能会缺依赖，自行补全）
  - 指定运行LD加载库或压缩目前无法做到（二进制带签名），需要逆向打patch
  - 插件依赖bash，系统需要安装bash
- - **下载目录必须位于真实挂载的文件系统上**：迅雷引擎会校验下载目录所在的存储卷，若目录位于容器的 overlay 根文件系统（如默认的 `/opt/thunder/downloads`），会因 `IsPathValid` 校验失败而任务无法开始。请通过 `thunder install -d <目录>` 将下载目录设置到一个独立挂载点（例如挂载的数据盘 `/data/...`）之下。
+ - **下载目录必须位于真实挂载点上，否则所有下载任务失败**：迅雷引擎启动时会在下载目录里创建测试文件夹来校验路径（`drive/config.go` 的 `IsPathValid`）。若目录位于容器的 overlay 根文件系统（如默认的 `/opt/thunder/downloads`），引擎会判定路径无效，网页面板里任务一添加就变「失败」。日志（`.../var/pan-xunlei-com-launcher.log`）中会持续刷 `GetDownloadPaths !IsPathValid:/opt/thunder/downloads/`、`all download path invalid`，任务进入 `PHASE_TYPE_ERROR` 并报 `下载信息(9104)`。
+   解决办法：安装时把下载目录（及绑定挂载目录）设到一个**独立挂载点**（如挂载的数据盘 `/data/...`）之下——
+
+   ```shell
+   thunder install \
+     --config-path /data/thunder-config \
+     --download-path /data/thunder-downloads \
+     --mount-bind-download-path /data/thunder-downloads
+   ```
+
+   验证成功的标志：日志中出现 `创建文件夹测试该路径是否存在空间:/data/... err:<nil>` 和 `获取到的下载文件路径:/data/...`，且不再有 `!IsPathValid` / `all download path invalid`。
  - **无 `CAP_SYS_ADMIN` 的容器**（如受限的 K8s Pod）无法执行 `mount --bind`，此时 thunder 会自动降级：直接使用下载目录本身，不再做绑定挂载，服务仍可正常启动。
 
