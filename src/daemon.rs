@@ -14,6 +14,15 @@ const DEFAULT_STDOUT_PATH: &str = "/var/run/thunder.out";
 const DEFAULT_STDERR_PATH: &str = "/var/run/thunder.err";
 const DEFAULT_WORK_DIR: &str = "/";
 
+/// Engine/launcher state files that must be removed on stop so a fresh start
+/// doesn't inherit a dead instance's sockets or pid files.
+const ENGINE_STATE_FILES: [&str; 4] = [
+    crate::constant::PID_FILE,
+    "/var/packages/pan-xunlei-com/target/var/pan-xunlei-com.pid.child",
+    "/var/packages/pan-xunlei-com/target/var/pan-xunlei-com.sock",
+    "/var/packages/pan-xunlei-com/target/var/pan-xunlei-com-launcher.sock",
+];
+
 /// Check if the user is root
 pub fn check_root() {
     if !nix::unistd::Uid::effective().is_root() {
@@ -22,23 +31,70 @@ pub fn check_root() {
     }
 }
 
+/// Whether a pid is a live process.
+fn pid_alive(pid: i32) -> bool {
+    // signal 0 performs error checking without actually sending a signal.
+    nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok()
+}
+
 /// Get the pid of the daemon
 pub fn get_pid() -> Option<i32> {
     if let Ok(data) = std::fs::read(PID_PATH) {
-        let binding = String::from_utf8(data).expect("pid file is not utf8");
-        return Some(binding.trim().parse().expect("pid file is not a number"));
+        let binding = String::from_utf8(data).ok()?;
+        return binding.trim().parse().ok();
     }
     None
 }
 
-/// Start the daemon
-pub fn start() -> Result<()> {
-    if let Some(pid) = get_pid() {
-        println!("Thunder is already running with pid: {pid}");
-        return Ok(());
+/// Kill any leftover launcher / core-engine processes and remove stale engine
+/// state files. This guarantees a clean single instance: 迅雷 allows only one
+/// online device per account, so a lingering launcher from a previous run
+/// causes the new one to be kicked (UserKickout) and the panel to go blank.
+fn cleanup_engine() {
+    use sysinfo::System;
+    let mut sys = System::new();
+    sys.refresh_all();
+
+    for (pid, proc_) in sys.processes() {
+        // Match the launcher and the versioned core engine by their exe name.
+        let name = proc_.name();
+        let cmd = proc_.cmd().join(" ");
+        let is_engine = name.contains("xunlei-pan-cli")
+            || cmd.contains("xunlei-pan-cli-launcher")
+            || cmd.contains("/xunlei-pan-cli.");
+        if is_engine {
+            let raw = pid.as_u32() as i32;
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(raw),
+                nix::sys::signal::SIGKILL,
+            );
+        }
     }
 
+    for f in ENGINE_STATE_FILES {
+        let _ = std::fs::remove_file(f);
+    }
+}
+
+
+/// Start the daemon
+pub fn start() -> Result<()> {
     check_root();
+
+    // If a pid file exists, only bail when that process is actually alive.
+    // A stale pid file (previous crash / kill) would otherwise wedge start.
+    if let Some(pid) = get_pid() {
+        if pid_alive(pid) {
+            println!("Thunder is already running with pid: {pid}");
+            return Ok(());
+        }
+        println!("Removing stale pid file (pid {pid} not running)");
+        let _ = std::fs::remove_file(PID_PATH);
+    }
+
+    // Guarantee a single instance: kill any orphaned launcher/engine left
+    // over from a previous run (prevents 迅雷 UserKickout / blank panel).
+    cleanup_engine();
 
     let pid_file = File::create(PID_PATH)?;
     pid_file.set_permissions(Permissions::from_mode(0o755))?;
@@ -47,7 +103,7 @@ pub fn start() -> Result<()> {
     stdout.set_permissions(Permissions::from_mode(0o755))?;
 
     let stderr = File::create(DEFAULT_STDERR_PATH)?;
-    stdout.set_permissions(Permissions::from_mode(0o755))?;
+    stderr.set_permissions(Permissions::from_mode(0o755))?;
 
     let daemonize = Daemonize::new()
         .pid_file(PID_PATH) // Every method except `new` and `start`
@@ -73,6 +129,7 @@ pub fn stop() -> Result<()> {
     check_root();
 
     if let Some(pid) = get_pid() {
+        // Signal the daemon to shut down, waiting until it exits.
         for _ in 0..360 {
             if signal::kill(Pid::from_raw(pid), signal::SIGINT).is_err() {
                 break;
@@ -81,6 +138,11 @@ pub fn stop() -> Result<()> {
         }
         let _ = std::fs::remove_file(PID_PATH);
     }
+
+    // Always clean up: the launcher is spawned independently and is NOT killed
+    // by signalling the daemon, so it (and the core engine) can linger as
+    // orphans. Remove them plus stale sockets/pid files.
+    cleanup_engine();
 
     Ok(())
 }
