@@ -39,9 +39,9 @@ pub enum DlCommand {
     Resume { ids: Vec<String> },
     /// Remove one or more tasks
     Rm(RmArgs),
-    /// Pull a completed cloud file to a local directory (HTTPS, no P2P)
+    /// Pull a file/folder from the cloud drive to a local directory (HTTPS, no P2P)
     Pull(PullArgs),
-    /// List cloud offline-download tasks (stored to the cloud drive)
+    /// Browse files stored in the cloud drive (to get ids for `pull`)
     Cloud(CloudArgs),
     /// Escape hatch: send a raw request to any API path and print the response
     Raw(RawArgs),
@@ -63,22 +63,11 @@ pub struct AddArgs {
     /// Comma-separated file indices to download (e.g. 0,2,5)
     #[clap(long, value_delimiter = ',')]
     pick: Vec<i64>,
-    /// Cloud mode: let 迅雷 servers fetch the resource into the cloud drive
-    /// (bypasses local P2P). Combine with --out to also pull it back.
-    #[clap(long)]
-    cloud: bool,
-    /// (cloud mode) After the cloud task completes, pull files into this
-    /// local directory over HTTPS. Implies waiting for completion.
-    #[clap(short, long)]
-    out: Option<PathBuf>,
-    /// (cloud mode) Wait for the cloud task to complete before returning.
-    #[clap(long)]
-    wait: bool,
 }
 
 #[derive(Args, Clone)]
 pub struct PullArgs {
-    /// Cloud task id (from `dl cloud`) or a cloud file/folder id
+    /// Cloud file or folder id (from `dl cloud`)
     id: String,
     /// Local directory to save into
     #[clap(short, long, default_value = ".")]
@@ -87,7 +76,10 @@ pub struct PullArgs {
 
 #[derive(Args, Clone)]
 pub struct CloudArgs {
-    /// Max tasks to fetch
+    /// Cloud folder id to list (empty = drive root)
+    #[clap(default_value = "")]
+    parent_id: String,
+    /// Max entries to fetch
     #[clap(short, long, default_value = "100")]
     limit: u32,
 }
@@ -158,9 +150,6 @@ fn source_to_url(source: &str) -> Result<String> {
 }
 
 fn cmd_add(client: &ThunderClient, cfg: &DlConfig, a: AddArgs) -> Result<()> {
-    if a.cloud {
-        return cmd_add_cloud(client, a);
-    }
     let url = source_to_url(&a.source)?;
     let resolved = client.resolve(&url).context("failed to resolve link")?;
 
@@ -197,53 +186,6 @@ fn cmd_add(client: &ThunderClient, cfg: &DlConfig, a: AddArgs) -> Result<()> {
     Ok(())
 }
 
-/// Cloud mode: submit an offline-download task (迅雷 servers fetch into the
-/// cloud drive). Optionally wait for completion and pull the files locally.
-fn cmd_add_cloud(client: &ThunderClient, a: AddArgs) -> Result<()> {
-    let url = source_to_url(&a.source)?;
-    let id = client
-        .cloud_add(&url, a.name.as_deref())
-        .context("failed to create cloud task")?;
-    println!("Cloud task created: {id}");
-    println!("  迅雷 servers are fetching the resource into your cloud drive.");
-
-    // If neither --wait nor --out was given, return immediately.
-    if !a.wait && a.out.is_none() {
-        println!("  Run `thunder dl cloud` to check progress, then `thunder dl pull {id} -o <dir>`.");
-        return Ok(());
-    }
-
-    let task = wait_for_cloud(client, &id)?;
-    if let Some(out) = a.out {
-        pull_cloud_file(client, &task.file_id, &task.name, &out)?;
-    } else {
-        println!("Cloud task complete. file_id: {}", task.file_id);
-        println!("  Pull it with: thunder dl pull {} -o <dir>", task.file_id);
-    }
-    Ok(())
-}
-
-/// Poll a cloud task until it completes (or errors). Prints progress.
-fn wait_for_cloud(client: &ThunderClient, id: &str) -> Result<crate::client::CloudTask> {
-    use std::io::Write;
-    loop {
-        let task = client
-            .cloud_task(id)?
-            .ok_or_else(|| anyhow!("cloud task {id} not found"))?;
-        print!("\r  [{}] {}% {}    ", task.phase_label(), task.progress, task.name);
-        std::io::stdout().flush().ok();
-        if task.is_complete() {
-            println!();
-            return Ok(task);
-        }
-        if task.is_error() {
-            println!();
-            return Err(anyhow!("cloud task failed: {}", task.message));
-        }
-        std::thread::sleep(std::time::Duration::from_secs(3));
-    }
-}
-
 /// Download a cloud file (or every file under a cloud folder) into `out`.
 fn pull_cloud_file(
     client: &ThunderClient,
@@ -272,42 +214,39 @@ fn pull_cloud_file(
 }
 
 fn cmd_pull(client: &ThunderClient, a: PullArgs) -> Result<()> {
-    // The id may be a cloud task id or a file id. Try resolving it as a task
-    // first (to get its file_id + name); fall back to treating it as a file id.
-    let (file_id, name) = match client.cloud_task(&a.id)? {
-        Some(t) if !t.file_id.is_empty() => (t.file_id, t.name),
-        _ => (a.id.clone(), a.id.clone()),
-    };
-    pull_cloud_file(client, &file_id, &name, &a.out)
+    // `id` is a cloud file or folder id (see `dl cloud`). pull_cloud_file walks
+    // it: a folder is fetched recursively, a file is fetched directly.
+    pull_cloud_file(client, &a.id, "", &a.out)
 }
 
 fn cmd_cloud(client: &ThunderClient, cfg: &DlConfig, a: CloudArgs) -> Result<()> {
-    let tasks = client.cloud_tasks(a.limit)?;
+    let files = client.cloud_files(&a.parent_id, a.limit)?;
     if cfg.json {
-        let arr: Vec<Value> = tasks
+        let arr: Vec<Value> = files
             .iter()
-            .map(|t| {
+            .map(|f| {
                 serde_json::json!({
-                    "id": t.id, "name": t.name, "progress": t.progress,
-                    "phase": t.phase_label(), "file_id": t.file_id, "message": t.message,
+                    "id": f.id, "name": f.name, "size": f.size, "is_dir": f.is_dir,
                 })
             })
             .collect();
         println!("{}", serde_json::to_string_pretty(&Value::Array(arr))?);
         return Ok(());
     }
-    if tasks.is_empty() {
-        println!("No cloud tasks.");
+    if files.is_empty() {
+        println!("Empty.");
         return Ok(());
     }
-    println!("{:<28} {:>4}%  {:<9}  NAME", "ID", "PROG", "PHASE");
-    for t in &tasks {
-        let id_short = if t.id.len() > 28 { &t.id[..28] } else { &t.id };
-        println!("{:<28} {:>4}  {:<9}  {}", id_short, t.progress, t.phase_label(), t.name);
-        if !t.message.is_empty() {
-            println!("  └ {}", t.message);
-        }
+    println!("{:<28} {:>10}  NAME", "ID", "SIZE");
+    for f in &files {
+        let size = if f.is_dir {
+            "<dir>".to_string()
+        } else {
+            human_size(f.size).unwrap_or_else(|| "-".into())
+        };
+        println!("{:<28} {:>10}  {}", f.id, size, f.name);
     }
+    println!("\nPull one with: thunder dl pull <ID> -o <dir>");
     Ok(())
 }
 

@@ -132,25 +132,22 @@ thunder dl raw POST drive/v1/task -b '{"...":"..."}'
 
 全局选项：`--host`（服务地址，默认 `127.0.0.1:5055`）、`--password`（若面板设置了访问密码）、`--json`。
 
-#### 云盘中转下载（绕过 P2P）
+#### 从云盘取回文件（HTTPS，绕过 P2P）
 
-普通的 `dl add` 是让**本机**去做 P2P/CDN 下载。在容器、受限网络等本机 P2P 数据面不通的环境下，可改用 `--cloud`：由**迅雷服务器**把资源下载到你的云盘，再通过 HTTPS 直链把文件取回本地——最后一跳是纯 HTTP，绕开 P2P。
+`dl add` 是让**本机**去做 P2P/CDN 下载。如果你的资源已经存在迅雷云盘里（例如用手机/PC 版迅雷离线下载存好的），可以直接把云盘文件通过 HTTPS 直链取回本地——纯 HTTP，绕开本机 P2P 数据面（适合容器、受限网络等本机 P2P 不通的环境）。
 
 ```shell
-# 仅提交云盘离线任务（迅雷服务器去下载，存入云盘）
-thunder dl add "magnet:?xt=..." --cloud
-
-# 一条龙：存云盘 → 等待完成 → 自动取回到本地目录
-thunder dl add "magnet:?xt=..." --cloud --out ./downloads
-
-# 查看云盘离线任务进度
+# 浏览云盘根目录，拿到文件/文件夹 id
 thunder dl cloud
 
-# 手动把已完成的云盘文件/文件夹取回本地（HTTPS，无 P2P）
-thunder dl pull <任务ID或文件ID> -o ./downloads
+# 浏览指定文件夹（id 见上一步输出）
+thunder dl cloud <文件夹ID>
+
+# 把云盘文件或整个文件夹取回本地目录（文件夹会递归下载）
+thunder dl pull <文件或文件夹ID> -o ./downloads
 ```
 
-> 注意：云盘离线下载依赖迅雷账号本身的离线下载权限（可能需要会员/配额）；对第三方转存资源获取直链时，迅雷服务端可能因版权/风控返回 `permission_denied`。
+> 说明：这个 NAS 引擎本身只提供**本机下载**任务，没有“让迅雷服务器离线下载到云盘”的能力——请用官方迅雷 App/PC 版做离线，再用 `dl pull` 取回。对第三方转存资源获取直链时，迅雷服务端可能因版权/风控返回 `permission_denied`。
 
 ### FQA
  - 当前大重构，`OpenWrt` / `Docker` 后续再完善支持
